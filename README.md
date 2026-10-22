@@ -133,3 +133,6 @@ Contributions, bug reports, and feature suggestions are welcome.
 ## License
 
 Refer to the repository's existing license for the applicable terms. Do not change or replace the license without authorization.
+
+
+Problem statement and solution overview • Architecture diagram and technology stack • Setup and execution instructions ;   • Deployment URL or approved local-demo details • Dataset attribution and licence • Team member details • Link to DEV_LOG.md, if maintained 
