@@ -1,10 +1,20 @@
-
 import math
 import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 
-DATA_PATH = Path("data/delhi_hour.csv")
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+
+CITY_FILES = {
+    "Delhi": "delhi_hour.csv",
+    "Mumbai": "mumbai_hour.csv",
+    "Bengaluru": "bengaluru_hour.csv",
+    "Kolkata": "kolkata_hour.csv",
+    "Chennai": "chennai_hour.csv",
+}
+
+DATA_PATH = DATA_DIR / CITY_FILES["Delhi"]
 
 SCHOOL_START = 6
 SCHOOL_END = 18
@@ -14,11 +24,26 @@ GENERAL_MAX_AQI = 200
 ASTHMA_MAX_AQI = 100
 
 
-def load_data():
-    if not DATA_PATH.exists():
-        raise FileNotFoundError(f"Dataset not found: {DATA_PATH}")
+def get_data_path(city="Delhi"):
+    if city not in CITY_FILES:
+        raise ValueError(
+            f"Unsupported city: {city}. Choose from {', '.join(CITY_FILES)}."
+        )
+    return DATA_DIR / CITY_FILES[city]
 
-    df = pd.read_csv(DATA_PATH)
+
+def load_data(city="Delhi"):
+    path = get_data_path(city)
+    if not path.exists():
+        raise FileNotFoundError(f"Dataset for {city} not found: {path}")
+
+    df = pd.read_csv(path)
+
+    if "Datetime" not in df.columns or "AQI" not in df.columns:
+        raise ValueError(
+            f"The {city} dataset must contain Datetime and AQI columns."
+        )
+
     df["Datetime"] = pd.to_datetime(df["Datetime"], errors="coerce")
     df["AQI"] = pd.to_numeric(df["AQI"], errors="coerce")
     df = df.dropna(subset=["Datetime"])
@@ -53,7 +78,6 @@ def ask_asthma_status():
 
         if answer in ("yes", "y"):
             return True
-
         if answer in ("no", "n"):
             return False
 
@@ -78,10 +102,11 @@ def get_time_limits():
             start = start_time.hour * 60 + start_time.minute
             end = end_time.hour * 60 + end_time.minute
 
-            if start < SCHOOL_START * 60 or end > SCHOOL_END * 60:
-                raise ValueError
-
-            if start >= end:
+            if (
+                start < SCHOOL_START * 60
+                or end > SCHOOL_END * 60
+                or start >= end
+            ):
                 raise ValueError
 
             return start, end
@@ -116,23 +141,22 @@ def get_readings(day, available_from, available_until):
                 "time": f"{hour:02d}:00",
                 "aqi": None,
                 "category": "Missing",
-                "status": "No reading"
+                "status": "No reading",
             })
         elif len(hourly) > 1:
             readings.append({
                 "time": f"{hour:02d}:00",
                 "aqi": None,
                 "category": "Invalid",
-                "status": "Duplicate timestamps"
+                "status": "Duplicate timestamps",
             })
         else:
             aqi = hourly.iloc[0]["AQI"]
-
             readings.append({
                 "time": f"{hour:02d}:00",
                 "aqi": aqi,
                 "category": category(aqi),
-                "status": "Observed" if pd.notna(aqi) else "Missing AQI"
+                "status": "Observed" if pd.notna(aqi) else "Missing AQI",
             })
 
     return readings
@@ -178,7 +202,7 @@ def evaluate_windows(
     duration_minutes,
     available_from,
     available_until,
-    max_aqi
+    max_aqi,
 ):
     if duration_minutes <= 0:
         return []
@@ -191,10 +215,7 @@ def evaluate_windows(
         start_minutes = start * 60
         end_minutes = start_minutes + duration_minutes
 
-        if start_minutes < available_from:
-            continue
-
-        if end_minutes > available_until:
+        if start_minutes < available_from or end_minutes > available_until:
             continue
 
         hours = list(range(start, start + duration_hours))
@@ -206,22 +227,16 @@ def evaluate_windows(
 
         if len(window) != duration_hours:
             continue
-
         if window["Datetime"].dt.hour.nunique() != duration_hours:
             continue
-
         if window["Datetime"].dt.date.nunique() != 1:
             continue
-
         if window["AQI"].isna().any():
             continue
-
         if (window["AQI"] < 0).any() or (window["AQI"] > 500).any():
             continue
-
         if window["Datetime"].dt.minute.ne(0).any():
             continue
-
         if any(timestamp in stuck_times for timestamp in window["Datetime"]):
             continue
 
@@ -240,14 +255,14 @@ def evaluate_windows(
             "average_aqi": round(average_aqi, 2),
             "category": category(worst_aqi),
             "policy_limit": max_aqi,
-            "policy_passed": worst_aqi <= max_aqi
+            "policy_passed": worst_aqi <= max_aqi,
         })
 
     windows.sort(
         key=lambda window: (
             window["worst_aqi"],
             window["average_aqi"],
-            window["start"]
+            window["start"],
         )
     )
 
@@ -263,7 +278,8 @@ def empty_result(status, reason):
         "alternatives": [],
         "best_available": None,
         "max_aqi": None,
-        "asthma": None
+        "asthma": None,
+        "city": "Delhi",
     }
 
 
@@ -272,7 +288,8 @@ def plan(
     duration_minutes,
     available_from,
     available_until,
-    asthma
+    asthma,
+    city="Delhi",
 ):
     try:
         selected_date = datetime.strptime(
@@ -281,27 +298,28 @@ def plan(
     except ValueError:
         return empty_result(
             "INVALID INPUT",
-            "Enter the date in YYYY-MM-DD format."
+            "Enter the date in YYYY-MM-DD format.",
         )
 
     if duration_minutes <= 0:
         return empty_result(
             "INVALID INPUT",
-            "Duration must be a positive number of minutes."
+            "Duration must be a positive number of minutes.",
         )
 
     max_aqi = ASTHMA_MAX_AQI if asthma else GENERAL_MAX_AQI
 
-    df = load_data()
+    df = load_data(city)
     day = df[df["Datetime"].dt.date == selected_date].copy()
 
     if day.empty:
         result = empty_result(
             "NO ADVICE",
-            "No historical data is available for this date."
+            "No historical data is available for this date.",
         )
         result["max_aqi"] = max_aqi
         result["asthma"] = asthma
+        result["city"] = city
         return result
 
     school_day = day[
@@ -312,7 +330,7 @@ def plan(
     readings = get_readings(
         school_day,
         available_from,
-        available_until
+        available_until,
     )
 
     candidates = evaluate_windows(
@@ -320,17 +338,16 @@ def plan(
         duration_minutes,
         available_from,
         available_until,
-        max_aqi
+        max_aqi,
     )
 
     best_available = candidates[0] if candidates else None
     approved = [
-        window for window in candidates
-        if window["policy_passed"]
+        window for window in candidates if window["policy_passed"]
     ]
 
     if not approved:
-        result = {
+        return {
             "status": "NO ADVICE",
             "reason": (
                 "No window passed the configured AQI policy."
@@ -345,9 +362,9 @@ def plan(
             "alternatives": [],
             "best_available": best_available,
             "max_aqi": max_aqi,
-            "asthma": asthma
+            "asthma": asthma,
+            "city": city,
         }
-        return result
 
     return {
         "status": "CANDIDATE FOUND",
@@ -357,95 +374,87 @@ def plan(
         "alternatives": approved[1:4],
         "best_available": best_available,
         "max_aqi": max_aqi,
-        "asthma": asthma
+        "asthma": asthma,
+        "city": city,
     }
 
 
 def display(result):
-    print("\n--- AQI POLICY ---")
-    print("Asthma indicated:", "Yes" if result["asthma"] else "No")
-    print("Configured maximum AQI:", result["max_aqi"])
+    print(f"\nCity: {result.get('city', 'Delhi')}")
+    print(f"Status: {result['status']}")
+    print(f"Reason: {result['reason']}")
 
-    print("\n--- HOURLY AQI READINGS ---")
+    if result.get("max_aqi") is not None:
+        print(f"Configured AQI limit: {result['max_aqi']}")
 
-    if not result["readings"]:
-        print("No readings available for the selected time range.")
+    if result.get("readings"):
+        print("\nHourly readings:")
+        for reading in result["readings"]:
+            print(
+                f"{reading['time']} | AQI: {reading['aqi']} | "
+                f"{reading['category']} | {reading['status']}"
+            )
 
-    for item in result["readings"]:
-        aqi = item["aqi"]
-
-        aqi_text = (
-            "N/A" if aqi is None or pd.isna(aqi)
-            else str(aqi)
+    recommended = result.get("recommended")
+    if recommended:
+        print("\nRecommended window:")
+        print(
+            f"{recommended['start']}–{recommended['end']} | "
+            f"Average AQI: {recommended['average_aqi']} | "
+            f"Worst AQI: {recommended['worst_aqi']}"
         )
 
+        alternatives = result.get("alternatives", [])
+        if alternatives:
+            print("\nAlternative windows:")
+            for window in alternatives:
+                print(
+                    f"{window['start']}–{window['end']} | "
+                    f"Average AQI: {window['average_aqi']} | "
+                    f"Worst AQI: {window['worst_aqi']}"
+                )
+    elif result.get("best_available"):
+        window = result["best_available"]
+        print("\nBest available window (does not pass policy):")
         print(
-            f'{item["time"]} | AQI {aqi_text:>6} | '
-            f'{item["category"]:<12} | {item["status"]}'
-        )
-
-    print("\n--- PLANNING RESULT ---")
-    print("Status:", result["status"])
-    print("Reason:", result["reason"])
-
-    if result["recommended"]:
-        print("\n--- APPROVED UNDER CONFIGURED POLICY ---")
-        print(result["recommended"])
-
-        if result["alternatives"]:
-            print("\n--- OTHER ELIGIBLE WINDOWS ---")
-            for alternative in result["alternatives"]:
-                print(alternative)
-
-    best = result["best_available"]
-
-    if best and result["recommended"] is None:
-        print("\n--- BEST AVAILABLE WINDOW (NOT APPROVED) ---")
-        print(f'Time: {best["start"]} - {best["end"]}')
-        print(f'Worst AQI: {best["worst_aqi"]}')
-        print(f'Average AQI: {best["average_aqi"]}')
-        print(f'Category: {best["category"]}')
-        print(f'Configured maximum AQI: {result["max_aqi"]}')
-        print("Warning: This window does not meet the configured AQI policy.")
-        print("It is not an approved recommendation.")
-
-    if result["asthma"]:
-        print(
-            "\nHealth note: This is a historical-data planning aid, "
-            "not medical clearance. Follow the child's asthma action "
-            "plan and relevant local health guidance."
+            f"{window['start']}–{window['end']} | "
+            f"Average AQI: {window['average_aqi']} | "
+            f"Worst AQI: {window['worst_aqi']}"
         )
 
 
 def main():
+    print("School AirSafe — Historical AQI Planner")
+    print("Available cities:", ", ".join(CITY_FILES))
+
+    city = input("Choose city [Delhi]: ").strip().title() or "Delhi"
+    if city not in CITY_FILES:
+        print(f"Unsupported city. Choose from: {', '.join(CITY_FILES)}")
+        return
+
     date_string = input("Enter date (YYYY-MM-DD): ").strip()
 
     try:
-        duration_minutes = int(
-            input("Activity duration in minutes (e.g. 45, 75, 135): ").strip()
-        )
+        duration = int(input("Activity duration in minutes: ").strip())
     except ValueError:
-        print("Invalid duration. Enter a whole number of minutes.")
+        print("Duration must be a number.")
         return
 
-    if duration_minutes <= 0:
-        print("Duration must be greater than zero.")
-        return
-
-    asthma = ask_asthma_status()
     available_from, available_until = get_time_limits()
+    asthma = ask_asthma_status()
 
     try:
         result = plan(
             date_string,
-            duration_minutes,
+            duration,
             available_from,
             available_until,
-            asthma
+            asthma,
+            city=city,
         )
         display(result)
-    except FileNotFoundError as error:
-        print(error)
+    except (FileNotFoundError, ValueError) as error:
+        print(f"Error: {error}")
 
 
 if __name__ == "__main__":

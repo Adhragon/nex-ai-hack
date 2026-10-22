@@ -14,6 +14,9 @@ import {
   LayoutGrid,
   ChevronLeft,
   ChevronRight,
+  CalendarClock,
+  MapPin,
+  Route,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -247,7 +250,7 @@ function HourlyAQIStrip({ readings }) {
 
 /* AQI calendar */
 
-function AQICalendar({ selectedDate, onSelectDate }) {
+function AQICalendar({ selectedDate, onSelectDate, city }) {
   const selectedYear = Number(selectedDate.slice(0, 4));
   const selectedMonth = Number(selectedDate.slice(5, 7)) - 1;
 
@@ -267,7 +270,7 @@ function AQICalendar({ selectedDate, onSelectDate }) {
 
       try {
         const response = await fetch(
-          `${API_URL}/api/calendar?year=${year}`
+          `${API_URL}/api/calendar?year=${year}&city=${encodeURIComponent(city)}`
         );
 
         const data = await response.json();
@@ -306,7 +309,7 @@ function AQICalendar({ selectedDate, onSelectDate }) {
     return () => {
       cancelled = true;
     };
-  }, [year]);
+  }, [year, city]);
 
   function changeYear(nextYear) {
     setYear(nextYear);
@@ -856,9 +859,174 @@ function AQIOverview({
   );
 }
 
+import CityComparison from "./CityComparison.jsx";
+
+const CITIES = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Chennai"];
+
+function formatAQI(value) {
+  return value == null || !Number.isFinite(Number(value)) ? "—" : Math.round(Number(value));
+}
+
+function Workspace({ defaultCity = "Delhi" }) {
+  const [origin, setOrigin] = useState(defaultCity);
+  const [destination, setDestination] = useState(defaultCity === "Delhi" ? "Mumbai" : "Delhi");
+  const [startDate, setStartDate] = useState("2019-07-15");
+  const [endDate, setEndDate] = useState("2019-07-17");
+  const [duration, setDuration] = useState("60");
+  const [tripResult, setTripResult] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function planTrip(event) {
+    event.preventDefault();
+    setError("");
+    setTripResult(null);
+
+    if (origin === destination) {
+      setError("Choose two different cities for your trip.");
+      return;
+    }
+    if (startDate > endDate) {
+      setError("The return date must be on or after the departure date.");
+      return;
+    }
+
+    const dates = [];
+    const current = new Date(`${startDate}T12:00:00`);
+    const last = new Date(`${endDate}T12:00:00`);
+    while (current <= last && dates.length < 31) {
+      dates.push(current.toISOString().slice(0, 10));
+      current.setDate(current.getDate() + 1);
+    }
+    if (!dates.length || startDate > endDate) {
+      setError("Choose a valid trip date range.");
+      return;
+    }
+    if (dates.length >= 31 && dates[dates.length - 1] !== endDate) {
+      setError("Please choose a trip of 31 days or fewer.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const comparisons = await Promise.all(
+        dates.map(async (date) => {
+          const response = await fetch(`${API_URL}/api/compare?${new URLSearchParams({
+            city_a: origin,
+            city_b: destination,
+            start_date: date,
+            end_date: date,
+          })}`);
+          const data = await response.json();
+          if (!response.ok) throw new Error(data.detail || `Could not load AQI for ${date}.`);
+          return { date, origin: data.city_a, destination: data.city_b };
+        })
+      );
+      setTripResult(comparisons);
+    } catch (err) {
+      setError(err.message || "Could not plan this trip. Check that the backend is running.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const originReadings = (tripResult ?? []).map((day) => day.origin.average_aqi).filter((value) => value != null);
+  const destinationReadings = (tripResult ?? []).map((day) => day.destination.average_aqi).filter((value) => value != null);
+  const originAverage = originReadings.length ? originReadings.reduce((sum, value) => sum + value, 0) / originReadings.length : null;
+  const destinationAverage = destinationReadings.length ? destinationReadings.reduce((sum, value) => sum + value, 0) / destinationReadings.length : null;
+
+  return (
+    <div className="workspace-content">
+      <section className="panel trip-scheduler-panel">
+        <div className="panel-heading">
+          <div className="section-icon"><CalendarClock size={19} /></div>
+          <div>
+            <h2>Trip scheduler</h2>
+            <p>Choose your route and dates to review historical air quality at both destinations.</p>
+          </div>
+        </div>
+
+        <form className="trip-form" onSubmit={planTrip}>
+          <label>
+            <span><MapPin size={14} /> Departure city</span>
+            <select value={origin} onChange={(event) => setOrigin(event.target.value)}>
+              {CITIES.map((city) => <option key={city} value={city}>{city}</option>)}
+            </select>
+          </label>
+          <label>
+            <span><Route size={14} /> Destination city</span>
+            <select value={destination} onChange={(event) => setDestination(event.target.value)}>
+              {CITIES.map((city) => <option key={city} value={city}>{city}</option>)}
+            </select>
+          </label>
+          <label>
+            <span><CalendarClock size={14} /> Departure date</span>
+            <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} required />
+          </label>
+          <label>
+            <span><CalendarClock size={14} /> Return date</span>
+            <input type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} required />
+          </label>
+          <label>
+            <span><Clock3 size={14} /> Planned outdoor activity</span>
+            <select value={duration} onChange={(event) => setDuration(event.target.value)}>
+              <option value="30">30 minutes</option>
+              <option value="60">1 hour</option>
+              <option value="90">1 hour 30 minutes</option>
+              <option value="120">2 hours</option>
+              <option value="180">3 hours</option>
+            </select>
+          </label>
+          <button className="primary-button" type="submit" disabled={loading}>
+            {loading ? "Checking trip dates…" : "Check trip AQI"}
+          </button>
+        </form>
+
+        <p className="trip-note">The scheduler compares historical AQI averages for each selected date. It does not book travel or forecast future AQI.</p>
+
+        {error && <div className="error-message" role="alert"><AlertTriangle size={17} />{error}</div>}
+
+        {tripResult && (
+          <div className="trip-results">
+            <div className="trip-summary-grid">
+              <div className="trip-summary-card">
+                <span>{origin} · Mean of available daily averages</span>
+                <strong>{formatAQI(originAverage)}</strong>
+                <small>{originReadings.length} day(s) with AQI data</small>
+              </div>
+              <div className="trip-summary-card">
+                <span>{destination} · Mean of available daily averages</span>
+                <strong>{formatAQI(destinationAverage)}</strong>
+                <small>{destinationReadings.length} day(s) with AQI data</small>
+              </div>
+            </div>
+            <div className="trip-day-list">
+              <h3>Daily trip overview</h3>
+              {tripResult.map((day) => (
+                <div className="trip-day-row" key={day.date}>
+                  <strong>{day.date}</strong>
+                  <span>{origin}: <b>{formatAQI(day.origin.average_aqi)}</b></span>
+                  <span>{destination}: <b>{formatAQI(day.destination.average_aqi)}</b></span>
+                  <span className="trip-duration"><Clock3 size={13} /> {duration} min activity</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <CityComparison />
+    </div>
+  );
+}
+
+
 /* Main application */
 
 function App() {
+  const [activeView, setActiveView] = useState("planner");
+  const [selectedCity, setSelectedCity] = useState("Delhi");
+  const cities = ["Delhi", "Mumbai", "Bengaluru", "Kolkata", "Chennai"];
   const [date, setDate] = useState("2019-07-15");
   const [duration, setDuration] = useState(60);
   const [timeRange, setTimeRange] = useState([
@@ -889,6 +1057,7 @@ function App() {
         },
         body: JSON.stringify({
           date,
+          city: selectedCity,
           duration_minutes: Number(duration),
           available_from: Number(timeRange[0]),
           available_until: Number(timeRange[1]),
@@ -943,13 +1112,45 @@ function App() {
 
         <div className="sidebar-section-label">WORKSPACE</div>
 
-        <a className="nav-item active" href="#planner">
-          <Activity size={18} /> Activity planner
-        </a>
+        <button
+          type="button"
+          className={`nav-item nav-button ${activeView === "planner" ? "active" : ""}`}
+          onClick={() => {setActiveView("planner");
 
-        <a className="nav-item" href="#workspace">
+            setTimeout(() => {
+              document.querySelector("main")?.scrollTo({
+                top: 0,
+                behavior: "smooth",
+              });
+
+              window.scrollTo({
+                top: 0,
+                behavior: "smooth",
+              });
+            }, 50);
+          }}
+        >
+          <Activity size={18} /> Activity planner
+        </button>
+
+        <button
+          type="button"
+          className="nav-item nav-button"
+          onClick={() => {
+            setActiveView("planner");
+            setTimeout(() => document.getElementById("workspace")?.scrollIntoView({ behavior: "smooth" }), 0);
+          }}
+        >
           <LayoutGrid size={18} /> AQI calendar
-        </a>
+        </button>
+
+        <button
+          type="button"
+          className={`nav-item nav-button ${activeView === "workspace" ? "active" : ""}`}
+          onClick={() => setActiveView("workspace")}
+        >
+          <CalendarDays size={18} /> Trip scheduler
+        </button>
 
         <div className="sidebar-note">
           <ShieldCheck size={19} />
@@ -972,18 +1173,39 @@ function App() {
         <header className="page-header">
           <div>
             <div className="eyebrow">SCHOOL OPERATIONS</div>
-            <h1>Activity planner</h1>
+            <h1>{activeView === "planner" ? "Activity planner" : "Workspace"}</h1>
             <p className="page-description">
-              Find a suitable time window for outdoor school activities.
+              {activeView === "planner"
+                ? "Find a suitable time window for outdoor school activities."
+                : "Schedule trips and compare historical air quality across cities."}
             </p>
           </div>
 
-          <div className="header-status">
-            <span className="status-dot" />
-            Historical AQI planning
+          <div className="header-actions">
+            <label className="city-selector">
+              <span>City</span>
+              <select
+                value={selectedCity}
+                onChange={(event) => {
+                  setSelectedCity(event.target.value);
+                  setResult(null);
+                  setError("");
+                }}
+                aria-label="Select dashboard city"
+              >
+                {cities.map((city) => (
+                  <option key={city} value={city}>{city}</option>
+                ))}
+              </select>
+            </label>
+            <div className="header-status">
+              <span className="status-dot" />
+              Historical AQI planning
+            </div>
           </div>
         </header>
 
+        {activeView === "planner" && <>
         <div className="dashboard-grid" id="planner">
           <section className="panel planner-panel">
             <div className="panel-heading">
@@ -1144,7 +1366,12 @@ function App() {
         <AQICalendar
           selectedDate={date}
           onSelectDate={setDate}
+          city={selectedCity}
         />
+
+        </>}
+
+        {activeView === "workspace" && <Workspace defaultCity={selectedCity} />}
 
         <footer className="disclaimer">
           <AlertTriangle size={16} />
