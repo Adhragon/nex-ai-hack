@@ -1,5 +1,8 @@
 from datetime import datetime
 import math
+import os
+import smtplib
+from email.message import EmailMessage
 from numbers import Integral, Real
 
 import numpy as np
@@ -32,6 +35,15 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+
+class ParentAlertEmailRequest(BaseModel):
+    recipients: list[str] = Field(min_length=1, max_length=200)
+    subject: str = Field(min_length=1, max_length=200)
+    message: str = Field(min_length=1, max_length=12000)
+    city: str
+    date: str
+    aqi: float | None = None
 
 
 class PlanRequest(BaseModel):
@@ -204,6 +216,122 @@ def create_plan(request: PlanRequest):
                 "Check the backend terminal for errors."
             ),
         )
+
+
+@app.get("/api/alerts/check")
+def check_parent_alert(
+    city: str = Query(default="Delhi"),
+    date: str = Query(...),
+    threshold: int = Query(default=200, ge=0, le=500),
+):
+    validate_city(city)
+    try:
+        selected_date = pd.to_datetime(date, errors="raise").normalize()
+    except (ValueError, TypeError):
+        raise HTTPException(status_code=422, detail="Date must use YYYY-MM-DD format.")
+
+    df = load_city_data(city)
+    selected = df[
+        (df["Datetime"] >= selected_date)
+        & (df["Datetime"] < selected_date + pd.Timedelta(days=1))
+    ].dropna(subset=["AQI"])
+    selected = selected[selected["AQI"].between(0, 500)]
+
+    if selected.empty:
+        return {
+            "city": city,
+            "date": date,
+            "threshold": threshold,
+            "aqi": None,
+            "triggered": False,
+            "message": "No valid historical AQI readings are available for this city and date.",
+            "data_type": "historical",
+        }
+
+    worst_aqi = float(selected["AQI"].max())
+    triggered = worst_aqi >= threshold
+    return {
+        "city": city,
+        "date": date,
+        "threshold": threshold,
+        "aqi": worst_aqi,
+        "readings": int(len(selected)),
+        "triggered": triggered,
+        "message": (
+            "Historical AQI meets or exceeds the configured threshold."
+            if triggered
+            else "Historical AQI is below the configured threshold."
+        ),
+        "data_type": "historical",
+    }
+
+
+@app.post("/api/alerts/send")
+def send_parent_alert(request: ParentAlertEmailRequest):
+    validate_city(request.city)
+    try:
+        datetime.strptime(request.date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Date must use YYYY-MM-DD format.")
+
+    smtp_host = os.getenv("AIRSAFE_SMTP_HOST", "").strip()
+    smtp_port = int(os.getenv("AIRSAFE_SMTP_PORT", "587"))
+    smtp_user = os.getenv("AIRSAFE_SMTP_USER", "").strip()
+    smtp_password = os.getenv("AIRSAFE_SMTP_PASSWORD", "")
+    from_email = os.getenv("AIRSAFE_FROM_EMAIL", smtp_user).strip()
+
+    if not all([smtp_host, smtp_user, smtp_password, from_email]):
+        raise HTTPException(
+            status_code=503,
+            detail="Email is not configured. Set AIRSAFE_SMTP_HOST, AIRSAFE_SMTP_PORT, AIRSAFE_SMTP_USER, AIRSAFE_SMTP_PASSWORD, and AIRSAFE_FROM_EMAIL in the backend environment.",
+        )
+
+    recipients = []
+    for address in request.recipients:
+        address = address.strip()
+        if (
+            not address
+            or "@" not in address
+            or address.startswith("@")
+            or address.endswith("@")
+            or any(char.isspace() for char in address)
+        ):
+            raise HTTPException(status_code=422, detail=f"Invalid email address: {address}")
+        if address not in recipients:
+            recipients.append(address)
+
+    try:
+        with smtplib.SMTP(smtp_host, smtp_port, timeout=20) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(smtp_user, smtp_password)
+            sent_count = 0
+            for recipient in recipients:
+                email = EmailMessage()
+                email["From"] = from_email
+                email["To"] = recipient
+                email["Subject"] = request.subject.strip()
+                email.set_content(
+                    request.message.strip()
+                    + f"\\n\\nHistorical record: {request.city}, {request.date}; "
+                    + (f"AQI {round(request.aqi)}." if request.aqi is not None else "AQI unavailable.")
+                )
+                server.send_message(email)
+                sent_count += 1
+    except HTTPException:
+        raise
+    except Exception as error:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Email delivery failed: {type(error).__name__}. Check SMTP settings and backend logs.",
+        )
+
+    return {
+        "status": "sent",
+        "sent_count": sent_count,
+        "message": f"Email sent successfully to {sent_count} recipient(s).",
+    }
 
 
 @app.get("/api/compare")

@@ -16,6 +16,9 @@ import {
   CalendarClock,
   MapPin,
   Route,
+  BellRing,
+  Mail,
+  Send,
 } from "lucide-react";
 import {
   ResponsiveContainer,
@@ -564,9 +567,124 @@ function AQICalendar({ selectedDate, onSelectDate, city }) {
   );
 }
 
+function ParentAlertButton({ city, date, aqi }) {
+  const [open, setOpen] = useState(false);
+  const [recipientsText, setRecipientsText] = useState("");
+  const [subject, setSubject] = useState("");
+  const [message, setMessage] = useState("");
+  const [status, setStatus] = useState("");
+  const [sending, setSending] = useState(false);
+
+  const threshold = 150;
+
+  useEffect(() => {
+    let cancelled = false;
+    async function prepareDraft() {
+      try {
+        const params = new URLSearchParams({
+          city,
+          date,
+          threshold: String(threshold),
+        });
+        const data = await fetchJSON(`${API_URL}/api/alerts/check?${params}`);
+        if (cancelled) return;
+        if (data?.triggered && data?.aqi != null) {
+          setSubject(`School AirSafe warning: ${city} historical AQI ${Math.round(data.aqi)}`);
+          setMessage(
+            `Dear Parents,\n\nSchool AirSafe's historical dataset records an AQI of ${Math.round(data.aqi)} for ${city} on ${date}, which meets or exceeds the configured warning threshold of ${threshold}.\n\nPlease follow current school communications and local public-health guidance regarding outdoor activities. This is a warning based on historical data, not a live air-quality measurement or a forecast.\n\nRegards,\nSchool Administration`
+          );
+        } else {
+          setSubject("");
+          setMessage("");
+        }
+      } catch (error) {
+        if (!cancelled) setStatus(error.message || "Could not prepare the historical AQI warning.");
+      }
+    }
+    prepareDraft();
+    return () => { cancelled = true; };
+  }, [city, date]);
+
+  async function sendEmail(event) {
+    event.preventDefault();
+    const recipients = recipientsText
+      .split(/[;,\n]/)
+      .map((email) => email.trim())
+      .filter(Boolean);
+
+    if (!recipients.length) {
+      setStatus("Enter at least one parent email address.");
+      return;
+    }
+    if (!subject.trim() || !message.trim()) {
+      setStatus("The warning draft is not available for this date.");
+      return;
+    }
+
+    setSending(true);
+    setStatus("");
+    try {
+      const data = await fetchJSON(`${API_URL}/api/alerts/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ recipients, subject, message, city, date, aqi }),
+      });
+      setStatus(data.message || "Email request completed.");
+    } catch (error) {
+      setStatus(error.message || "Email was not sent.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="inline-parent-alert">
+      <button
+        type="button"
+        className="parent-alert-trigger"
+        onClick={() => { setOpen((value) => !value); setStatus(""); }}
+      >
+        <BellRing size={16} />
+        {open ? "Hide parent warning" : "Notify parents about poor AQI"}
+      </button>
+
+      {open && (
+        <form className="inline-parent-alert-form" onSubmit={sendEmail}>
+          <div className="inline-parent-alert-note">
+            Historical AQI for {city} on {date}: {aqi == null ? "unavailable" : Math.round(aqi)}.
+            This is historical data, not a live alert.
+          </div>
+          <label>
+            Parent email addresses
+            <textarea
+              rows={2}
+              value={recipientsText}
+              onChange={(event) => setRecipientsText(event.target.value)}
+              placeholder="parent1@example.com, parent2@example.com"
+              required
+            />
+          </label>
+          <label>
+            Email subject
+            <input value={subject} onChange={(event) => setSubject(event.target.value)} required />
+          </label>
+          <label>
+            Message
+            <textarea rows={6} value={message} onChange={(event) => setMessage(event.target.value)} required />
+          </label>
+          <button className="primary-button" type="submit" disabled={sending}>
+            <Send size={15} /> {sending ? "Sending email…" : "Send email to parents"}
+          </button>
+          {status && <p className="inline-parent-alert-status" role="status">{status}</p>}
+        </form>
+      )}
+    </div>
+  );
+}
+
 /* Activity recommendations — table removed */
 
-function ActivityRecommendations({ result, loading }) {
+function ActivityRecommendations({ result, loading, city, date }) {
   const recommended = result?.recommended ?? null;
 
   const alternatives = Array.isArray(result?.alternatives)
@@ -574,6 +692,9 @@ function ActivityRecommendations({ result, loading }) {
     : [];
 
   const bestAvailable = result?.best_available ?? null;
+  const alertWindow = recommended ?? bestAvailable;
+  const alertAQIValue = alertWindow ? worstAQI(alertWindow) : null;
+  const shouldShowParentAlert = alertAQIValue != null && Number(alertAQIValue) >= 150;
 
   return (
     <section className="panel recommendations-panel">
@@ -652,6 +773,14 @@ function ActivityRecommendations({ result, loading }) {
               </span>
             )}
           </div>
+
+          {shouldShowParentAlert && (
+            <ParentAlertButton
+              city={city}
+              date={date}
+              aqi={alertAQIValue}
+            />
+          )}
 
           {!recommended && bestAvailable && (
             <div className="best-available">
@@ -882,6 +1011,95 @@ function Workspace({ defaultCity = "Delhi" }) {
   const [planLoading, setPlanLoading] = useState(false);
   const [error, setError] = useState("");
   const [planError, setPlanError] = useState("");
+  const [alertThreshold, setAlertThreshold] = useState(200);
+  const [parentEmails, setParentEmails] = useState("");
+  const [alertSubject, setAlertSubject] = useState("");
+  const [alertMessage, setAlertMessage] = useState("");
+  const [alertAQI, setAlertAQI] = useState(null);
+  const [alertStatus, setAlertStatus] = useState("");
+  const [alertLoading, setAlertLoading] = useState(false);
+  const [sendLoading, setSendLoading] = useState(false);
+  const [alertAutoChecked, setAlertAutoChecked] = useState("");
+
+  function makeAlertDraft(data) {
+    if (!data?.triggered || data.aqi == null) {
+      setAlertAQI(data?.aqi ?? null);
+      setAlertStatus(data?.message || "No warning threshold was crossed for this historical date.");
+      setAlertSubject("");
+      setAlertMessage("");
+      return;
+    }
+    setAlertAQI(data.aqi);
+    setAlertSubject(`School AirSafe warning: ${data.city} historical AQI ${Math.round(data.aqi)}`);
+    setAlertMessage(
+      `Dear Parents,\\n\\nSchool AirSafe's historical dataset records an AQI of ${Math.round(data.aqi)} for ${data.city} on ${data.date}, which meets or exceeds our configured warning threshold of ${alertThreshold}.\\n\\nPlease follow current school communications and local public-health guidance regarding outdoor activities. This is a warning based on historical data, not a live air-quality measurement or a forecast.\\n\\nRegards,\\nSchool Administration`
+    );
+    setAlertStatus("Threshold crossed in historical data. Review this draft before sending.");
+  }
+
+  async function checkParentAlert(manual = false) {
+    if (!selectedDate || !destination) return;
+    setAlertLoading(true);
+    if (manual) setAlertStatus("");
+    try {
+      const params = new URLSearchParams({
+        city: destination,
+        date: selectedDate,
+        threshold: String(alertThreshold),
+      });
+      const data = await fetchJSON(`${API_URL}/api/alerts/check?${params}`);
+      makeAlertDraft(data);
+      setAlertAutoChecked(`${destination}:${selectedDate}:${alertThreshold}`);
+    } catch (err) {
+      setAlertStatus(err.message || "Could not check historical AQI.");
+      setAlertAQI(null);
+    } finally {
+      setAlertLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    const key = `${destination}:${selectedDate}:${alertThreshold}`;
+    if (key === alertAutoChecked) return;
+    const timer = setTimeout(() => {
+      checkParentAlert(false);
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [destination, selectedDate, alertThreshold, alertAutoChecked]);
+
+  async function sendParentAlert(event) {
+    event.preventDefault();
+    const recipients = parentEmails.split(/[;,\\n]/).map((email) => email.trim()).filter(Boolean);
+    if (!recipients.length) {
+      setAlertStatus("Enter at least one parent email address.");
+      return;
+    }
+    if (!alertSubject.trim() || !alertMessage.trim()) {
+      setAlertStatus("Generate a warning draft first by checking the selected date.");
+      return;
+    }
+    setSendLoading(true);
+    setAlertStatus("");
+    try {
+      const data = await fetchJSON(`${API_URL}/api/alerts/send`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          recipients,
+          subject: alertSubject,
+          message: alertMessage,
+          city: destination,
+          date: selectedDate,
+          aqi: alertAQI,
+        }),
+      });
+      setAlertStatus(data.message || "Email request completed.");
+    } catch (err) {
+      setAlertStatus(err.message || "Email was not sent.");
+    } finally {
+      setSendLoading(false);
+    }
+  }
 
   function getDates(from, to) {
     const dates = [];
@@ -1177,6 +1395,7 @@ function Workspace({ defaultCity = "Delhi" }) {
         )}
       </section>
       <CityComparison />
+
     </div>
   );
 }
@@ -1508,6 +1727,8 @@ function App() {
             <ActivityRecommendations
               result={result}
               loading={loading}
+              city={selectedCity}
+              date={date}
             />
 
             <HourlyAQIStrip readings={readings} />
