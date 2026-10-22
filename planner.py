@@ -63,7 +63,6 @@ def get_time_limits():
 
             if start < SCHOOL_START * 60 or end > SCHOOL_END * 60:
                 raise ValueError
-
             if start >= end:
                 raise ValueError
 
@@ -166,54 +165,39 @@ def evaluate_windows(
 
     windows = []
     stuck_times = find_stuck_timestamps(day)
+    duration_hours = math.ceil(duration_minutes / 60)
 
-    # Candidate starts align with hourly observations.
     for start in range(SCHOOL_START, SCHOOL_END):
         start_minutes = start * 60
         end_minutes = start_minutes + duration_minutes
 
-        if start_minutes < available_from:
+        if start_minutes < available_from or end_minutes > available_until:
             continue
 
-        if end_minutes > available_until:
-            continue
-
-        # Include every hourly observation from the start through
-        # the last hour touched by the activity.
-        hours_needed = math.ceil(duration_minutes / 60)
-        hours = list(range(start, start + hours_needed))
+        hours = list(range(start, start + duration_hours))
 
         if not hours or hours[-1] >= SCHOOL_END:
             continue
 
         window = day[day["Datetime"].dt.hour.isin(hours)].copy()
 
-        if len(window) != hours_needed:
+        if len(window) != duration_hours:
             continue
-
-        if window["Datetime"].dt.hour.nunique() != hours_needed:
+        if window["Datetime"].dt.hour.nunique() != duration_hours:
             continue
-
         if window["Datetime"].dt.date.nunique() != 1:
             continue
-
         if window["AQI"].isna().any():
             continue
-
         if (window["AQI"] < 0).any() or (window["AQI"] > 500).any():
             continue
-
         if window["Datetime"].dt.minute.ne(0).any():
             continue
-
         if any(timestamp in stuck_times for timestamp in window["Datetime"]):
             continue
 
         worst_aqi = float(window["AQI"].max())
         average_aqi = float(window["AQI"].mean())
-
-        if worst_aqi > MAX_AQI:
-            continue
 
         end_time = datetime(2000, 1, 1, start, 0) + timedelta(
             minutes=duration_minutes
@@ -225,7 +209,8 @@ def evaluate_windows(
             "duration_minutes": duration_minutes,
             "worst_aqi": worst_aqi,
             "average_aqi": round(average_aqi, 2),
-            "category": category(worst_aqi)
+            "category": category(worst_aqi),
+            "policy_passed": worst_aqi <= MAX_AQI
         })
 
     windows.sort(
@@ -248,7 +233,8 @@ def plan(date_string, duration_minutes, available_from, available_until):
             "reason": "Enter the date in YYYY-MM-DD format.",
             "readings": [],
             "recommended": None,
-            "alternatives": []
+            "alternatives": [],
+            "best_available": None
         }
 
     if duration_minutes <= 0:
@@ -257,7 +243,8 @@ def plan(date_string, duration_minutes, available_from, available_until):
             "reason": "Duration must be a positive number of minutes.",
             "readings": [],
             "recommended": None,
-            "alternatives": []
+            "alternatives": [],
+            "best_available": None
         }
 
     df = load_data()
@@ -269,7 +256,8 @@ def plan(date_string, duration_minutes, available_from, available_until):
             "reason": "No historical data is available for this date.",
             "readings": [],
             "recommended": None,
-            "alternatives": []
+            "alternatives": [],
+            "best_available": None
         }
 
     school_day = day[
@@ -283,31 +271,38 @@ def plan(date_string, duration_minutes, available_from, available_until):
         available_until
     )
 
-    windows = evaluate_windows(
+    candidates = evaluate_windows(
         school_day,
         duration_minutes,
         available_from,
         available_until
     )
 
-    if not windows:
+    best_available = candidates[0] if candidates else None
+    approved = [w for w in candidates if w["policy_passed"]]
+
+    if not approved:
         return {
             "status": "NO ADVICE",
             "reason": (
-                "No window passed the data-quality checks, time constraints, "
-                "and configured AQI policy."
+                "No window passed the configured AQI policy and "
+                "data-quality checks."
+                if best_available
+                else "No window passed the time and data-quality checks."
             ),
             "readings": readings,
             "recommended": None,
-            "alternatives": []
+            "alternatives": [],
+            "best_available": best_available
         }
 
     return {
         "status": "CANDIDATE FOUND",
         "reason": "Best eligible window under the configured policy.",
         "readings": readings,
-        "recommended": windows[0],
-        "alternatives": windows[1:4]
+        "recommended": approved[0],
+        "alternatives": approved[1:4],
+        "best_available": best_available
     }
 
 
@@ -319,11 +314,7 @@ def display(result):
 
     for item in result["readings"]:
         aqi = item["aqi"]
-
-        if aqi is None or pd.isna(aqi):
-            aqi_text = "N/A"
-        else:
-            aqi_text = str(aqi)
+        aqi_text = "N/A" if aqi is None or pd.isna(aqi) else str(aqi)
 
         print(
             f'{item["time"]} | AQI {aqi_text:>6} | '
@@ -335,8 +326,24 @@ def display(result):
     print("Reason:", result["reason"])
 
     if result["recommended"]:
-        print("Recommended:", result["recommended"])
-        print("Alternatives:", result["alternatives"])
+        print("\n--- APPROVED RECOMMENDATION ---")
+        print(result["recommended"])
+
+        if result["alternatives"]:
+            print("\n--- ALTERNATIVES ---")
+            for alternative in result["alternatives"]:
+                print(alternative)
+
+    best = result.get("best_available")
+
+    if best and result["recommended"] is None:
+        print("\n--- BEST AVAILABLE WINDOW (NOT APPROVED) ---")
+        print(f'Time: {best["start"]} - {best["end"]}')
+        print(f'Worst AQI: {best["worst_aqi"]}')
+        print(f'Average AQI: {best["average_aqi"]}')
+        print(f'Category: {best["category"]}')
+        print("Warning: This window fails the configured AQI policy.")
+        print("It is not an approved recommendation.")
 
 
 def main():
@@ -344,10 +351,10 @@ def main():
 
     try:
         duration_minutes = int(
-            input("Activity duration in minutes (e.g. 45, 75, 115): ").strip()
+            input("Activity duration in minutes (e.g. 45, 75, 135): ").strip()
         )
     except ValueError:
-        print("Invalid duration. Enter a number of minutes.")
+        print("Invalid duration. Enter a whole number of minutes.")
         return
 
     if duration_minutes <= 0:
