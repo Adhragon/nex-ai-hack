@@ -1,4 +1,3 @@
-
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity,
@@ -872,68 +871,150 @@ function Workspace({ defaultCity = "Delhi" }) {
   const [destination, setDestination] = useState(defaultCity === "Delhi" ? "Mumbai" : "Delhi");
   const [startDate, setStartDate] = useState("2019-07-15");
   const [endDate, setEndDate] = useState("2019-07-17");
-  const [duration, setDuration] = useState("60");
+  const [duration, setDuration] = useState(60);
+  // Keep the trip scheduler's preferred hours in this component's state.
+  // App has a separate time range for the single-day activity planner.
+  const [timeRange, setTimeRange] = useState([480, 1080]);
+  const [selectedDate, setSelectedDate] = useState("2019-07-15");
   const [tripResult, setTripResult] = useState(null);
+  const [selectedPlan, setSelectedPlan] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [planLoading, setPlanLoading] = useState(false);
   const [error, setError] = useState("");
+  const [planError, setPlanError] = useState("");
+
+  function getDates(from, to) {
+    const dates = [];
+    const current = new Date(`${from}T12:00:00`);
+    const last = new Date(`${to}T12:00:00`);
+    while (current <= last && dates.length < 31) {
+      dates.push(`${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, "0")}-${String(current.getDate()).padStart(2, "0")}`);
+      current.setDate(current.getDate() + 1);
+    }
+    return dates;
+  }
+
+  async function fetchJSON(url, options) {
+    const response = await fetch(url, options);
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(typeof data.detail === "string" ? data.detail : "The server could not process this request.");
+    }
+    return data;
+  }
+
+  async function fetchDay(date) {
+    const params = new URLSearchParams({
+      city_a: origin,
+      city_b: destination,
+      start_date: date,
+      end_date: date,
+    });
+    const planRequest = {
+      date,
+      city: destination,
+      duration_minutes: 60,
+      available_from: Number(timeRange[0]),
+      available_until: Number(timeRange[1]),
+      health_considerations: false,
+    };
+    const [comparison, activityPlan] = await Promise.all([
+      fetchJSON(`${API_URL}/api/compare?${params}`),
+      fetchJSON(`${API_URL}/api/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(planRequest),
+      }),
+    ]);
+    return { date, origin: comparison.city_a, destination: comparison.city_b, activityPlan };
+  }
 
   async function planTrip(event) {
     event.preventDefault();
     setError("");
+    setPlanError("");
     setTripResult(null);
-
+    setSelectedPlan(null);
     if (origin === destination) {
       setError("Choose two different cities for your trip.");
       return;
     }
-    if (startDate > endDate) {
-      setError("The return date must be on or after the departure date.");
+    if (!startDate || !endDate || startDate > endDate) {
+      setError("Choose a valid start date and end date.");
       return;
     }
-
-    const dates = [];
-    const current = new Date(`${startDate}T12:00:00`);
-    const last = new Date(`${endDate}T12:00:00`);
-    while (current <= last && dates.length < 31) {
-      dates.push(current.toISOString().slice(0, 10));
-      current.setDate(current.getDate() + 1);
-    }
-    if (!dates.length || startDate > endDate) {
-      setError("Choose a valid trip date range.");
-      return;
-    }
-    if (dates.length >= 31 && dates[dates.length - 1] !== endDate) {
+    const dates = getDates(startDate, endDate);
+    if (!dates.length || dates[dates.length - 1] !== endDate) {
       setError("Please choose a trip of 31 days or fewer.");
       return;
     }
-
     setLoading(true);
     try {
-      const comparisons = await Promise.all(
-        dates.map(async (date) => {
-          const response = await fetch(`${API_URL}/api/compare?${new URLSearchParams({
-            city_a: origin,
-            city_b: destination,
-            start_date: date,
-            end_date: date,
-          })}`);
-          const data = await response.json();
-          if (!response.ok) throw new Error(data.detail || `Could not load AQI for ${date}.`);
-          return { date, origin: data.city_a, destination: data.city_b };
-        })
-      );
-      setTripResult(comparisons);
+      const days = await Promise.all(dates.map(fetchDay));
+      setTripResult(days);
+      setSelectedDate(dates[0]);
     } catch (err) {
-      setError(err.message || "Could not plan this trip. Check that the backend is running.");
+      setError(err.message || "Could not load trip AQI data. Check that the backend is running.");
     } finally {
       setLoading(false);
     }
   }
 
-  const originReadings = (tripResult ?? []).map((day) => day.origin.average_aqi).filter((value) => value != null);
-  const destinationReadings = (tripResult ?? []).map((day) => day.destination.average_aqi).filter((value) => value != null);
-  const originAverage = originReadings.length ? originReadings.reduce((sum, value) => sum + value, 0) / originReadings.length : null;
-  const destinationAverage = destinationReadings.length ? destinationReadings.reduce((sum, value) => sum + value, 0) / destinationReadings.length : null;
+  async function checkSelectedDay() {
+    if (!selectedDate) return;
+    setPlanLoading(true);
+    setPlanError("");
+    setSelectedPlan(null);
+    try {
+      const result = await fetchJSON(`${API_URL}/api/plan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date: selectedDate,
+          city: destination,
+          duration_minutes: Number(duration),
+          available_from: Number(timeRange[0]),
+          available_until: Number(timeRange[1]),
+          health_considerations: false,
+        }),
+      });
+      setSelectedPlan(result);
+    } catch (err) {
+      setPlanError(err.message || "Could not calculate the selected day's plan.");
+    } finally {
+      setPlanLoading(false);
+    }
+  }
+
+  function formatDate(date) {
+    return new Date(`${date}T12:00:00`).toLocaleDateString("en-IN", {
+      weekday: "short", day: "numeric", month: "short", year: "numeric",
+    });
+  }
+
+  function formatClock(minutes) {
+    const hour = Math.floor(Number(minutes) / 60);
+    const minute = Number(minutes) % 60;
+    const suffix = hour >= 12 ? "PM" : "AM";
+    const displayHour = hour % 12 || 12;
+    return `${displayHour}:${String(minute).padStart(2, "0")} ${suffix}`;
+  }
+
+  function formatDuration(minutes) {
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    const mins = minutes % 60;
+    return mins ? `${hours} hr ${mins} min` : `${hours} hr`;
+  }
+
+  function bestWindow(day) {
+    return day?.activityPlan?.recommended ?? day?.activityPlan?.best_available ?? null;
+  }
+
+  const selectedDay = (tripResult ?? []).find((day) => day.date === selectedDate);
+  const selectedAQI = selectedDay?.destination?.average_aqi ?? null;
+  const recommended = selectedPlan?.recommended;
+  const bestAvailable = selectedPlan?.best_available;
 
   return (
     <div className="workspace-content">
@@ -942,86 +1023,163 @@ function Workspace({ defaultCity = "Delhi" }) {
           <div className="section-icon"><CalendarClock size={19} /></div>
           <div>
             <h2>Trip scheduler</h2>
-            <p>Choose your route and dates to review historical air quality at both destinations.</p>
+            <p>Review historical AQI for every day of your trip, then plan an outdoor activity for one selected day.</p>
           </div>
         </div>
 
         <form className="trip-form" onSubmit={planTrip}>
           <label>
             <span><MapPin size={14} /> Departure city</span>
-            <select value={origin} onChange={(event) => setOrigin(event.target.value)}>
+            <select value={origin} onChange={(e) => setOrigin(e.target.value)}>
               {CITIES.map((city) => <option key={city} value={city}>{city}</option>)}
             </select>
           </label>
           <label>
             <span><Route size={14} /> Destination city</span>
-            <select value={destination} onChange={(event) => setDestination(event.target.value)}>
+            <select value={destination} onChange={(e) => setDestination(e.target.value)}>
               {CITIES.map((city) => <option key={city} value={city}>{city}</option>)}
             </select>
           </label>
           <label>
-            <span><CalendarClock size={14} /> Departure date</span>
-            <input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} required />
+            <span><CalendarClock size={14} /> Start date</span>
+            <input type="date" value={startDate} onChange={(e) => {
+              setStartDate(e.target.value);
+              if (endDate < e.target.value) setEndDate(e.target.value);
+            }} required />
           </label>
           <label>
-            <span><CalendarClock size={14} /> Return date</span>
-            <input type="date" value={endDate} min={startDate} onChange={(event) => setEndDate(event.target.value)} required />
-          </label>
-          <label>
-            <span><Clock3 size={14} /> Planned outdoor activity</span>
-            <select value={duration} onChange={(event) => setDuration(event.target.value)}>
-              <option value="30">30 minutes</option>
-              <option value="60">1 hour</option>
-              <option value="90">1 hour 30 minutes</option>
-              <option value="120">2 hours</option>
-              <option value="180">3 hours</option>
-            </select>
+            <span><CalendarClock size={14} /> End date</span>
+            <input type="date" min={startDate} value={endDate} onChange={(e) => setEndDate(e.target.value)} required />
           </label>
           <button className="primary-button" type="submit" disabled={loading}>
-            {loading ? "Checking trip dates…" : "Check trip AQI"}
+            {loading ? "Checking each day…" : "Review trip AQI"}
           </button>
         </form>
 
-        <p className="trip-note">The scheduler compares historical AQI averages for each selected date. It does not book travel or forecast future AQI.</p>
-
+        <div className="preferred-time-control">
+          <div className="preferred-time-heading">
+            <div>
+              <strong>Preferred time frame</strong>
+              <p>Only search for activity windows within the hours you choose.</p>
+            </div>
+            <span>{formatClock(timeRange[0])} – {formatClock(timeRange[1])}</span>
+          </div>
+          <div className="preferred-time-fields">
+            <label>From
+              <select value={timeRange[0]} onChange={(e) => {
+                const from = Number(e.target.value);
+                setTimeRange([from, Math.max(Number(timeRange[1]), from + 30)]);
+                setSelectedPlan(null);
+              }}>
+                {Array.from({ length: 25 }, (_, i) => i * 30).filter((m) => m < 1080).map((m) => <option key={m} value={m}>{formatClock(m)}</option>)}
+              </select>
+            </label>
+            <label>Until
+              <select value={timeRange[1]} onChange={(e) => {
+                const until = Number(e.target.value);
+                setTimeRange([Math.min(Number(timeRange[0]), until - 30), until]);
+                setSelectedPlan(null);
+              }}>
+                {Array.from({ length: 25 }, (_, i) => (i + 1) * 30).filter((m) => m <= 1080).map((m) => <option key={m} value={m}>{formatClock(m)}</option>)}
+              </select>
+            </label>
+          </div>
+        </div>
+        <p className="trip-note">Historical data only. Each day's best window is searched within your preferred time frame. The duration slider applies only to the selected day.</p>
         {error && <div className="error-message" role="alert"><AlertTriangle size={17} />{error}</div>}
 
         {tripResult && (
-          <div className="trip-results">
-            <div className="trip-summary-grid">
-              <div className="trip-summary-card">
-                <span>{origin} · Mean of available daily averages</span>
-                <strong>{formatAQI(originAverage)}</strong>
-                <small>{originReadings.length} day(s) with AQI data</small>
-              </div>
-              <div className="trip-summary-card">
-                <span>{destination} · Mean of available daily averages</span>
-                <strong>{formatAQI(destinationAverage)}</strong>
-                <small>{destinationReadings.length} day(s) with AQI data</small>
-              </div>
+          <div className="trip-day-section">
+            <div className="trip-results-heading">
+              <h3>Daily air quality</h3>
+              <span>{tripResult.length} days reviewed</span>
             </div>
             <div className="trip-day-list">
-              <h3>Daily trip overview</h3>
-              {tripResult.map((day) => (
-                <div className="trip-day-row" key={day.date}>
-                  <strong>{day.date}</strong>
-                  <span>{origin}: <b>{formatAQI(day.origin.average_aqi)}</b></span>
-                  <span>{destination}: <b>{formatAQI(day.destination.average_aqi)}</b></span>
-                  <span className="trip-duration"><Clock3 size={13} /> {duration} min activity</span>
-                </div>
-              ))}
+              {tripResult.map((day) => {
+                const aqi = day.destination?.average_aqi ?? null;
+                const window = bestWindow(day);
+                const chosen = day.date === selectedDate;
+                const approved = Boolean(day.activityPlan?.recommended);
+                return (
+                  <button type="button" key={day.date}
+                    className={`trip-day-card ${chosen ? "trip-day-selected" : ""}`}
+                    onClick={() => { setSelectedDate(day.date); setSelectedPlan(null); setPlanError(""); }}>
+                    <div className="trip-day-date">
+                      <strong>{formatDate(day.date)}</strong>
+                      <span>{chosen ? "Selected day" : "Select day"}</span>
+                    </div>
+                    <div className="trip-day-aqi">
+                      <strong style={{ color: aqiColor(aqi) }}>{formatAQI(aqi)}</strong>
+                      <span>Destination mean AQI</span>
+                    </div>
+                    <div className="trip-day-window">
+                      <strong>{window ? formatWindow(window) : "No window found"}</strong>
+                      <span>{approved ? "Passes configured AQI threshold" : window ? "Best available; threshold not met" : "Insufficient data for a window"}</span>
+                    </div>
+                    <span className="trip-day-arrow">{chosen ? "Selected" : "Choose"}</span>
+                  </button>
+                );
+              })}
             </div>
+
+            <section className="selected-day-planner">
+              <div className="panel-heading">
+                <div className="section-icon"><Clock3 size={19} /></div>
+                <div>
+                  <h3>Plan activity for {formatDate(selectedDate)}</h3>
+                  <p>Duration applies to this selected day only.</p>
+                </div>
+              </div>
+              <div className="selected-day-summary">
+                <span>Destination: <strong>{destination}</strong></span>
+                <span>Daily mean AQI: <strong>{formatAQI(selectedAQI)}</strong></span>
+              </div>
+              <div className="duration-control">
+                <div className="duration-heading">
+                  <label htmlFor="trip-duration">Outdoor activity duration</label>
+                  <strong>{formatDuration(duration)}</strong>
+                </div>
+                <input id="trip-duration" className="duration-slider" type="range"
+                  min="30" max="240" step="15" value={duration}
+                  onChange={(e) => { setDuration(Number(e.target.value)); setSelectedPlan(null); setPlanError(""); }} />
+                <div className="slider-labels"><span>30 min</span><span>2 hr</span><span>4 hr</span></div>
+              </div>
+              <button type="button" className="primary-button" onClick={checkSelectedDay} disabled={planLoading}>
+                {planLoading ? "Finding suitable window…" : `Find window for ${formatDuration(duration)}`}
+              </button>
+              {planError && <div className="error-message" role="alert"><AlertTriangle size={17} />{planError}</div>}
+              {selectedPlan && (
+                <div className="selected-plan-result">
+                  {recommended ? (
+                    <div className="selected-plan-success">
+                      <CheckCircle2 size={22} />
+                      <div>
+                        <strong>Recommended activity window</strong>
+                        <h3>{formatWindow(recommended)}</h3>
+                        <p>Worst AQI: {formatAQI(recommended.worst_aqi)} · Average AQI: {formatAQI(recommended.average_aqi)} · Duration: {formatDuration(duration)}</p>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="selected-plan-warning">
+                      <AlertTriangle size={22} />
+                      <div>
+                        <strong>No approved window found</strong>
+                        <p>{selectedPlan.reason || "No window met the configured AQI threshold."}</p>
+                        {bestAvailable && <p>Best available: {formatWindow(bestAvailable)} · Worst AQI: {formatAQI(bestAvailable.worst_aqi)}</p>}
+                      </div>
+                    </div>
+                  )}
+                  <p className="trip-note">This recommendation uses historical readings and configured thresholds; it is not a guarantee of safe air. Follow local guidance and school health policies.</p>
+                </div>
+              )}
+            </section>
           </div>
         )}
       </section>
-
       <CityComparison />
     </div>
   );
 }
-
-
-/* Main application */
 
 function App() {
   const [activeView, setActiveView] = useState("planner");

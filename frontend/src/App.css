@@ -1,4 +1,3 @@
-
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&display=swap');
 
 :root {
@@ -997,3 +996,77 @@ input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.12); box-sh
     justify-content: flex-start;
   }
 }
+
+/* Trip scheduler day-by-day planning additions */
+.trip-results-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 28px 0 14px;
+}
+.trip-results-heading h3 { margin: 0; color: #172b45; font-size: 17px; }
+.trip-results-heading > span { color: #64748b; font-size: 12px; }
+.trip-day-list { display: grid; gap: 10px; }
+.trip-day-card {
+  display: grid;
+  grid-template-columns: 1.15fr .8fr 1.3fr auto;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 16px;
+  text-align: left;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  background: #fff;
+  color: #172b45;
+  cursor: pointer;
+  transition: border-color 160ms ease, background 160ms ease;
+}
+.trip-day-card:hover { border-color: #8da8c7; }
+.trip-day-selected { border-color: #476b96; background: #f3f7fc; box-shadow: 0 0 0 1px #476b96 inset; }
+.trip-day-date, .trip-day-aqi, .trip-day-window { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.trip-day-date strong, .trip-day-window strong { font-size: 13px; }
+.trip-day-date span, .trip-day-aqi span, .trip-day-window span { color: #64748b; font-size: 11px; line-height: 1.5; }
+.trip-day-aqi strong { font-size: 24px; line-height: 1; }
+.trip-day-arrow { color: #476b96; font-size: 12px; font-weight: 700; }
+.selected-day-planner { margin-top: 24px; padding: 22px; border: 1px solid #e2e8f0; border-radius: 16px; background: #f9fbfe; }
+.selected-day-planner .panel-heading { margin-bottom: 22px; }
+.selected-day-planner .panel-heading h3 { margin: 0 0 5px; color: #172b45; font-size: 17px; }
+.selected-day-planner .panel-heading p { margin: 0; color: #64748b; font-size: 13px; }
+.selected-day-summary { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 0 0 20px; color: #64748b; font-size: 13px; }
+.selected-day-summary strong { color: #172b45; }
+.duration-control { margin-bottom: 20px; }
+.duration-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.duration-heading label { color: #334155; font-size: 13px; font-weight: 600; }
+.duration-heading strong { color: #31577f; font-size: 16px; }
+.duration-slider { width: 100%; accent-color: #476b96; cursor: pointer; }
+.slider-labels { display: flex; justify-content: space-between; margin-top: 6px; color: #64748b; font-size: 11px; }
+.selected-plan-result { margin-top: 20px; }
+.selected-plan-success, .selected-plan-warning { display: flex; align-items: flex-start; gap: 12px; padding: 16px; border: 1px solid #dbe5ef; border-radius: 12px; background: #fff; }
+.selected-plan-success > svg { flex-shrink: 0; color: #24834b; }
+.selected-plan-warning > svg { flex-shrink: 0; color: #bd7724; }
+.selected-plan-success strong, .selected-plan-warning strong { display: block; margin-bottom: 7px; color: #172b45; }
+.selected-plan-success h3 { margin: 0 0 7px; font-size: 21px; }
+.selected-plan-success p, .selected-plan-warning p { margin: 5px 0; color: #64748b; font-size: 13px; line-height: 1.6; }
+@media (max-width: 900px) {
+  .trip-day-card { grid-template-columns: 1fr .7fr; }
+  .trip-day-window { grid-column: 1 / 2; }
+  .trip-day-arrow { grid-column: 2 / 3; grid-row: 2; justify-self: end; }
+}
+@media (max-width: 540px) {
+  .trip-day-card { grid-template-columns: 1fr; gap: 12px; }
+  .trip-day-window, .trip-day-arrow { grid-column: auto; grid-row: auto; justify-self: start; }
+  .selected-day-planner { padding: 16px; }
+}
+
+
+.preferred-time-control { margin: 18px 0 10px; padding: 16px 18px; border: 1px solid #e2e8f0; border-radius: 14px; background: #fbfdff; }
+.preferred-time-heading { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 14px; }
+.preferred-time-heading strong { color: #203550; font-size: 14px; }
+.preferred-time-heading p { margin: 4px 0 0; color: #64748b; font-size: 12px; }
+.preferred-time-heading > span { color: #526b89; font-weight: 700; font-size: 13px; white-space: nowrap; }
+.preferred-time-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.preferred-time-fields label { display: flex; flex-direction: column; gap: 7px; color: #52627a; font-size: 12px; font-weight: 600; }
+.preferred-time-fields select { width: 100%; min-height: 40px; border: 1px solid #d8e1ec; border-radius: 9px; padding: 8px 10px; background: white; color: #203550; font: inherit; }
+@media (max-width: 600px) { .preferred-time-heading { align-items: flex-start; flex-direction: column; } .preferred-time-fields { grid-template-columns: 1fr; }}
