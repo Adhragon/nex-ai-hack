@@ -3,6 +3,12 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime, timedelta
 
+try:
+    from predict import predict_school_hours, has_model
+except ImportError:
+    predict_school_hours = None
+    has_model = None
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
 
@@ -151,12 +157,15 @@ def get_readings(day, available_from, available_until):
                 "status": "Duplicate timestamps",
             })
         else:
-            aqi = hourly.iloc[0]["AQI"]
+            row = hourly.iloc[0]
+            aqi = row["AQI"]
+            is_forecast = ("Source" in row.index and row["Source"] == "Forecast")
+            status = "Forecasted" if is_forecast else ("Observed" if pd.notna(aqi) else "Missing AQI")
             readings.append({
                 "time": f"{hour:02d}:00",
                 "aqi": aqi,
                 "category": category(aqi),
-                "status": "Observed" if pd.notna(aqi) else "Missing AQI",
+                "status": status,
             })
 
     return readings
@@ -269,7 +278,7 @@ def evaluate_windows(
     return windows
 
 
-def empty_result(status, reason):
+def empty_result(status, reason, data_source="historical"):
     return {
         "status": status,
         "reason": reason,
@@ -280,6 +289,7 @@ def empty_result(status, reason):
         "max_aqi": None,
         "asthma": None,
         "city": "Delhi",
+        "data_source": data_source,
     }
 
 
@@ -290,6 +300,7 @@ def plan(
     available_until,
     asthma,
     city="Delhi",
+    mode="auto",
 ):
     try:
         selected_date = datetime.strptime(
@@ -309,23 +320,70 @@ def plan(
 
     max_aqi = ASTHMA_MAX_AQI if asthma else GENERAL_MAX_AQI
 
-    df = load_data(city)
-    day = df[df["Datetime"].dt.date == selected_date].copy()
+    school_day = None
+    data_source = "historical"
 
-    if day.empty:
-        result = empty_result(
-            "NO ADVICE",
-            "No historical data is available for this date.",
-        )
-        result["max_aqi"] = max_aqi
-        result["asthma"] = asthma
-        result["city"] = city
-        return result
+    # If mode is not strictly 'forecast', try to load historical data first
+    if mode != "forecast":
+        try:
+            df = load_data(city)
+            day = df[df["Datetime"].dt.date == selected_date].copy()
+            if not day.empty:
+                school_day = day[
+                    (day["Datetime"].dt.hour >= SCHOOL_START)
+                    & (day["Datetime"].dt.hour < SCHOOL_END)
+                ].copy()
+                data_source = "historical"
+        except Exception:
+            school_day = None
 
-    school_day = day[
-        (day["Datetime"].dt.hour >= SCHOOL_START)
-        & (day["Datetime"].dt.hour < SCHOOL_END)
-    ].copy()
+    # If no historical data exists or mode is 'forecast', use the ML prediction model
+    if school_day is None or school_day.empty:
+        if mode == "historical":
+            result = empty_result(
+                "NO ADVICE",
+                "No historical data is available for this date.",
+                data_source="historical",
+            )
+            result["max_aqi"] = max_aqi
+            result["asthma"] = asthma
+            result["city"] = city
+            return result
+
+        if predict_school_hours is None:
+            result = empty_result(
+                "NO ADVICE",
+                "No historical data available and prediction module could not be loaded.",
+                data_source="unavailable",
+            )
+            result["max_aqi"] = max_aqi
+            result["asthma"] = asthma
+            result["city"] = city
+            return result
+
+        try:
+            school_day = predict_school_hours(city, date_string)
+            data_source = "forecast"
+        except FileNotFoundError as err:
+            result = empty_result(
+                "NO ADVICE",
+                f"No historical data for {date_string}. {err}",
+                data_source="unavailable",
+            )
+            result["max_aqi"] = max_aqi
+            result["asthma"] = asthma
+            result["city"] = city
+            return result
+        except Exception as err:
+            result = empty_result(
+                "NO ADVICE",
+                f"Forecast generation failed: {err}",
+                data_source="error",
+            )
+            result["max_aqi"] = max_aqi
+            result["asthma"] = asthma
+            result["city"] = city
+            return result
 
     readings = get_readings(
         school_day,
@@ -346,11 +404,13 @@ def plan(
         window for window in candidates if window["policy_passed"]
     ]
 
+    reason_suffix = " (forecasted)" if data_source == "forecast" else ""
+
     if not approved:
         return {
             "status": "NO ADVICE",
             "reason": (
-                "No window passed the configured AQI policy."
+                f"No window passed the configured AQI policy{reason_suffix}."
                 if best_available
                 else (
                     "No window passed the time and data-quality checks. "
@@ -364,11 +424,12 @@ def plan(
             "max_aqi": max_aqi,
             "asthma": asthma,
             "city": city,
+            "data_source": data_source,
         }
 
     return {
         "status": "CANDIDATE FOUND",
-        "reason": "Best eligible window under the configured policy.",
+        "reason": f"Best eligible window under the configured policy{reason_suffix}.",
         "readings": readings,
         "recommended": approved[0],
         "alternatives": approved[1:4],
@@ -376,11 +437,13 @@ def plan(
         "max_aqi": max_aqi,
         "asthma": asthma,
         "city": city,
+        "data_source": data_source,
     }
 
 
 def display(result):
     print(f"\nCity: {result.get('city', 'Delhi')}")
+    print(f"Data source: {result.get('data_source', 'historical').upper()}")
     print(f"Status: {result['status']}")
     print(f"Reason: {result['reason']}")
 

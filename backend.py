@@ -59,6 +59,7 @@ class PlanRequest(BaseModel):
         le=SCHOOL_END * 60,
     )
     health_considerations: bool = False
+    mode: str = "auto"
 
 
 def validate_city(city):
@@ -125,6 +126,16 @@ def load_city_data(city):
     df.loc[~df["AQI"].between(0, 500), "AQI"] = np.nan
 
     return df.sort_values("Datetime").reset_index(drop=True)
+
+
+@app.get("/")
+def root():
+    return {
+        "status": "running",
+        "service": "School AirSafe API",
+        "docs": "http://127.0.0.1:8000/docs",
+        "health": "http://127.0.0.1:8000/api/health",
+    }
 
 
 @app.get("/api/health")
@@ -197,6 +208,7 @@ def create_plan(request: PlanRequest):
             request.available_until,
             request.health_considerations,
             city=request.city,
+            mode=request.mode,
         )
 
         result["city"] = request.city
@@ -215,6 +227,43 @@ def create_plan(request: PlanRequest):
                 "The planner could not process this request. "
                 "Check the backend terminal for errors."
             ),
+        )
+
+
+@app.get("/api/predict")
+def get_prediction(
+    city: str = Query(default="Delhi"),
+    date: str = Query(...),
+):
+    validate_city(city)
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Date must use YYYY-MM-DD format.")
+
+    try:
+        from predict import predict_school_hours
+        df = predict_school_hours(city, date)
+        readings = [
+            {
+                "time": dt.strftime("%H:%M"),
+                "aqi": aqi,
+                "status": "Forecasted",
+            }
+            for dt, aqi in zip(df["Datetime"], df["AQI"])
+        ]
+        return make_json_safe({
+            "city": city,
+            "date": date,
+            "data_source": "forecast",
+            "readings": readings,
+        })
+    except FileNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error))
+    except Exception as error:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Forecast generation failed: {error}",
         )
 
 
@@ -238,15 +287,36 @@ def check_parent_alert(
     selected = selected[selected["AQI"].between(0, 500)]
 
     if selected.empty:
-        return {
-            "city": city,
-            "date": date,
-            "threshold": threshold,
-            "aqi": None,
-            "triggered": False,
-            "message": "No valid historical AQI readings are available for this city and date.",
-            "data_type": "historical",
-        }
+        # Fallback to forecast if historical records do not cover this date
+        try:
+            from predict import predict_school_hours
+            pred_df = predict_school_hours(city, date)
+            worst_aqi = float(pred_df["AQI"].max())
+            triggered = worst_aqi >= threshold
+            return {
+                "city": city,
+                "date": date,
+                "threshold": threshold,
+                "aqi": worst_aqi,
+                "readings": int(len(pred_df)),
+                "triggered": triggered,
+                "message": (
+                    "Forecasted AQI meets or exceeds the configured threshold."
+                    if triggered
+                    else "Forecasted AQI is below the configured threshold."
+                ),
+                "data_type": "forecast",
+            }
+        except Exception:
+            return {
+                "city": city,
+                "date": date,
+                "threshold": threshold,
+                "aqi": None,
+                "triggered": False,
+                "message": "No valid historical AQI readings or forecasts available for this city and date.",
+                "data_type": "none",
+            }
 
     worst_aqi = float(selected["AQI"].max())
     triggered = worst_aqi >= threshold

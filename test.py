@@ -5,12 +5,17 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 cities = ['bengaluru', 'chennai', 'delhi', 'kolkata', 'mumbai']
-models_dir = '/content/nex-ai-hack/models'
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+MODELS_DIR = BASE_DIR / "models"
+models_dir = str(MODELS_DIR)
 
 print("--- Running Model Validation Suite ---")
 for city in cities:
-    clean_file = f'/content/nex-ai-hack/data/{city}_clean.csv'
-    if not os.path.exists(clean_file):
+    clean_file = DATA_DIR / f"{city}_clean.csv"
+    if not clean_file.exists():
         print(f"Clean file for {city} not found. Please run train.py first.")
         continue
         

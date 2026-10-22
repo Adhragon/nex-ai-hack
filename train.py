@@ -7,18 +7,25 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import IterativeImputer
 from sklearn.multioutput import MultiOutputRegressor
 
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
+MODELS_DIR = BASE_DIR / "models"
+MODELS_DIR.mkdir(exist_ok=True)
+
 file_paths = [
-    '/content/nex-ai-hack/data/bengaluru_hour_with_festivals_anomalies.csv',
-    '/content/nex-ai-hack/data/chennai_hour_with_festivals_anomalies.csv',
-    '/content/nex-ai-hack/data/delhi_hour_with_festivals_anomalies.csv',
-    '/content/nex-ai-hack/data/kolkata_hour_with_festivals_anomalies.csv',
-    '/content/nex-ai-hack/data/mumbai_hour_with_festivals_anomalies.csv'
+    DATA_DIR / "bengaluru_hour_with_festivals_anomalies.csv",
+    DATA_DIR / "chennai_hour_with_festivals_anomalies.csv",
+    DATA_DIR / "delhi_hour_with_festivals_anomalies.csv",
+    DATA_DIR / "kolkata_hour_with_festivals_anomalies.csv",
+    DATA_DIR / "mumbai_hour_with_festivals_anomalies.csv",
 ]
+file_paths = [p for p in file_paths if p.exists()]
 
 primary_sensors = ['PM2.5', 'PM10', 'NO', 'NO2', 'NOx', 'CO', 'SO2', 'O3']
 imputed_cities = {}
-models_dir = '/content/nex-ai-hack/models'
-os.makedirs(models_dir, exist_ok=True)
+models_dir = str(MODELS_DIR)
 
 print("--- Step 1: Processing, Imputing and Saving Clean Datasets ---")
 for file in file_paths:
@@ -49,7 +56,7 @@ for file in file_paths:
     imputed_cities[city_name] = df_filtered
     
     # Save clean datasets
-    df_filtered.to_csv(f'/content/nex-ai-hack/data/{city_name.lower()}_clean.csv', index=False)
+    df_filtered.to_csv(DATA_DIR / f"{city_name.lower()}_clean.csv", index=False)
 
 print("--- Step 2: Training 1H Model, 8H Model, and Long-Horizon Calendar Models ---")
 for city, df in imputed_cities.items():
@@ -65,52 +72,52 @@ for city, df in imputed_cities.items():
     df['Target_Next_Hour_AQI'] = df['AQI'].shift(-1)
     df_1h = df.dropna(subset=['Target_Next_Hour_AQI']).copy()
     exclude_cols = ['Datetime', 'City', 'Festival_or_Anomaly', 'Target_Next_Hour_AQI', 'Hour', 'Month']
-    features_1h = [col for col in df_1h.columns if col not in exclude_cols and np.issubdtype(df_1h[col].dtype, np.number)]
+    features_1h = [col for col in df_1h.columns if col not in exclude_cols and pd.api.types.is_numeric_dtype(df_1h[col])]
     
     split_idx = int(len(df_1h) * 0.8)
     model_1h = xgb.XGBRegressor(n_estimators=150, learning_rate=0.05, max_depth=6, random_state=42, objective='reg:squarederror')
     model_1h.fit(df_1h[features_1h].iloc[:split_idx], df_1h['Target_Next_Hour_AQI'].iloc[:split_idx])
     
-    with open(f'{models_dir}/{city.lower()}_model_1h.pkl', 'wb') as f:
-        pickle.dump({'model': model_1h, 'features': features_1h}, f)
+    with open(MODELS_DIR / f"{city.lower()}_model_1h.pkl", "wb") as f:
+        pickle.dump({"model": model_1h, "features": features_1h}, f)
         
     # Target engineering (8H MultiOutput)
     target_cols_8h = []
     df_8h = df.copy()
     for h in range(1, 9):
-        col_name = f'Target_Next_{h}H_AQI'
-        df_8h[col_name] = df_8h['AQI'].shift(-h)
+        col_name = f"Target_Next_{h}H_AQI"
+        df_8h[col_name] = df_8h["AQI"].shift(-h)
         target_cols_8h.append(col_name)
     df_8h = df_8h.dropna(subset=target_cols_8h).copy()
     
-    exclude_cols_8h = ['Datetime', 'City', 'Festival_or_Anomaly', 'Hour', 'Month'] + target_cols_8h
-    features_8h = [col for col in df_8h.columns if col not in exclude_cols_8h and np.issubdtype(df_8h[col].dtype, np.number)]
+    exclude_cols_8h = ["Datetime", "City", "Festival_or_Anomaly", "Hour", "Month"] + target_cols_8h
+    features_8h = [col for col in df_8h.columns if col not in exclude_cols_8h and pd.api.types.is_numeric_dtype(df_8h[col])]
     
     split_8h = int(len(df_8h) * 0.8)
-    base_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, random_state=42, objective='reg:squarederror')
+    base_model = xgb.XGBRegressor(n_estimators=100, learning_rate=0.05, max_depth=5, random_state=42, objective="reg:squarederror")
     model_8h = MultiOutputRegressor(base_model)
     model_8h.fit(df_8h[features_8h].iloc[:split_8h], df_8h[target_cols_8h].iloc[:split_8h])
     
-    with open(f'{models_dir}/{city.lower()}_model_8h.pkl', 'wb') as f:
-        pickle.dump({'model': model_8h, 'features': features_8h}, f)
+    with open(MODELS_DIR / f"{city.lower()}_model_8h.pkl", "wb") as f:
+        pickle.dump({"model": model_8h, "features": features_8h}, f)
 
     # Target engineering (Long Horizon Calendar-Only)
     df_lh = df.copy()
-    day_of_year = df_lh['Datetime'].dt.dayofyear
-    df_lh['Year_Sin'] = np.sin(2 * np.pi * day_of_year / 365.25)
-    df_lh['Year_Cos'] = np.cos(2 * np.pi * day_of_year / 365.25)
-    df_lh['Hour_Sin'] = np.sin(2 * np.pi * df_lh['Hour'] / 24.0)
-    df_lh['Hour_Cos'] = np.cos(2 * np.pi * df_lh['Hour'] / 24.0)
-    df_lh['DayOfWeek'] = df_lh['Datetime'].dt.dayofweek
+    day_of_year = df_lh["Datetime"].dt.dayofyear
+    df_lh["Year_Sin"] = np.sin(2 * np.pi * day_of_year / 365.25)
+    df_lh["Year_Cos"] = np.cos(2 * np.pi * day_of_year / 365.25)
+    df_lh["Hour_Sin"] = np.sin(2 * np.pi * df_lh["Hour"] / 24.0)
+    df_lh["Hour_Cos"] = np.cos(2 * np.pi * df_lh["Hour"] / 24.0)
+    df_lh["DayOfWeek"] = df_lh["Datetime"].dt.dayofweek
     
-    fest_cols_lh = [c for c in df_lh.columns if c.startswith('Fest_')]
-    features_lh = ['Year_Sin', 'Year_Cos', 'Hour_Sin', 'Hour_Cos', 'DayOfWeek'] + fest_cols_lh
+    fest_cols_lh = [c for c in df_lh.columns if c.startswith("Fest_")]
+    features_lh = ["Year_Sin", "Year_Cos", "Hour_Sin", "Hour_Cos", "DayOfWeek"] + fest_cols_lh
     
     split_lh = int(len(df_lh) * 0.8)
     model_lh = xgb.XGBRegressor(n_estimators=1000, learning_rate=0.1, max_depth=10, colsample_bytree=0.8, random_state=42, n_jobs=-1)
-    model_lh.fit(df_lh[features_lh].iloc[:split_lh], df_lh['AQI'].iloc[:split_lh])
+    model_lh.fit(df_lh[features_lh].iloc[:split_lh], df_lh["AQI"].iloc[:split_lh])
     
-    with open(f'{models_dir}/{city.lower()}_model_lh.pkl', 'wb') as f:
-        pickle.dump({'model': model_lh, 'features': features_lh}, f)
+    with open(MODELS_DIR / f"{city.lower()}_model_lh.pkl", "wb") as f:
+        pickle.dump({"model": model_lh, "features": features_lh}, f)
 
-print("Training complete! All models stored in /content/nex-ai-hack/models/")
+print(f"Training complete! All models stored in {MODELS_DIR}")
